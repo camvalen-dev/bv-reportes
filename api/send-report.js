@@ -50,15 +50,32 @@ export default async function handler(req, res) {
       </div>
     `;
 
-    const data = await resend.emails.send({
+    const recipients = Array.isArray(to) ? to.filter(Boolean) : [to].filter(Boolean);
+    if (recipients.length === 0) {
+      return res.status(400).json({ error: 'No hay destinatarios válidos' });
+    }
+
+    const response = await resend.emails.send({
       from: `BV Reportes <${fromEmail}>`,
-      to: Array.isArray(to) ? to : [to],
+      to: recipients,
       subject: `Reporte Diario · ${obraNombre || 'Obra'} · ${fecha || ''} · ${equipo || ''}`,
       html,
-      attachments: [{ filename: fileName, content: fileBase64 }],
+      attachments: [{
+        filename: fileName,
+        content: Buffer.from(fileBase64, 'base64'),
+      }],
     });
 
-    return res.status(200).json({ success: true, id: data?.data?.id });
+    if (response?.error) {
+      console.error('Resend error:', response.error);
+      return res.status(502).json({
+        error: response.error.message || 'Resend rechazó el envío',
+        details: response.error,
+        hint: 'Si usas onboarding@resend.dev, Resend solo permite enviar al correo con el que te registraste. Verifica un dominio propio en resend.com/domains para enviar a cualquier correo.',
+      });
+    }
+
+    return res.status(200).json({ success: true, id: response?.data?.id, to: recipients });
   } catch (err) {
     console.error('Error enviando correo:', err);
     return res.status(500).json({ error: err.message || 'Error desconocido' });

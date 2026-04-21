@@ -10,7 +10,8 @@ import {
   collection, doc, setDoc, deleteDoc, onSnapshot, query, orderBy, getDoc, where
 } from 'firebase/firestore';
 import {
-  onAuthStateChanged, signInWithEmailAndPassword, signOut
+  onAuthStateChanged, signInWithEmailAndPassword, signOut,
+  sendPasswordResetEmail, updatePassword, reauthenticateWithCredential, EmailAuthProvider
 } from 'firebase/auth';
 import { db, auth, firebaseOk } from './firebase';
 
@@ -603,7 +604,13 @@ const LeaderScreen = ({ obra, onBack, hideBack }) => {
     try {
       const wb = construirExcel();
       const buffer = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
-      const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      const base64 = btoa(binary);
       const fname = `Reporte_${obra.nombre.replace(/\s+/g, '_')}_${(nombreEquipo || 'equipo').replace(/\s+/g, '_')}_${fecha}.xlsx`;
 
       const res = await fetch('/api/send-report', {
@@ -621,7 +628,11 @@ const LeaderScreen = ({ obra, onBack, hideBack }) => {
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Error al enviar');
+      if (!res.ok) {
+        const msg = data.error || 'Error al enviar';
+        const hint = data.hint ? `\n\n${data.hint}` : '';
+        throw new Error(msg + hint);
+      }
       setResultado({ tipo: 'correo', nombre: fname, destino: correosSeleccionados.join(', ') });
     } catch (err) {
       alert(`Error al enviar correo: ${err.message}`);
@@ -890,12 +901,134 @@ const ActividadCard = ({ numero, actividad, esEspecial, opciones, onChange, hhTo
 // =============================================================
 // LOGIN
 // =============================================================
+// =============================================================
+// CAMBIAR CONTRASEÑA (usuario autenticado)
+// =============================================================
+const ChangePasswordModal = ({ onClose }) => {
+  const [actual, setActual] = useState('');
+  const [nueva, setNueva] = useState('');
+  const [confirmar, setConfirmar] = useState('');
+  const [showActual, setShowActual] = useState(false);
+  const [showNueva, setShowNueva] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [ok, setOk] = useState('');
+
+  const submit = async (e) => {
+    e?.preventDefault();
+    setError(''); setOk('');
+    if (!actual || !nueva || !confirmar) { setError('Completa todos los campos'); return; }
+    if (nueva.length < 6) { setError('La nueva contraseña debe tener al menos 6 caracteres'); return; }
+    if (nueva !== confirmar) { setError('Las contraseñas no coinciden'); return; }
+    if (nueva === actual) { setError('La nueva contraseña debe ser distinta'); return; }
+
+    setLoading(true);
+    try {
+      const user = auth.currentUser;
+      const cred = EmailAuthProvider.credential(user.email, actual);
+      await reauthenticateWithCredential(user, cred);
+      await updatePassword(user, nueva);
+      setOk('Contraseña actualizada correctamente');
+      setActual(''); setNueva(''); setConfirmar('');
+      setTimeout(() => onClose(), 1500);
+    } catch (err) {
+      const msg = err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password'
+        ? 'La contraseña actual es incorrecta'
+        : err.code === 'auth/weak-password'
+        ? 'Contraseña muy débil (mínimo 6 caracteres)'
+        : err.code === 'auth/requires-recent-login'
+        ? 'Por seguridad, cierra sesión y vuelve a iniciar para cambiar la contraseña'
+        : err.message || 'No se pudo cambiar la contraseña';
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-5" onClick={onClose}>
+      <div className="w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+        <Card>
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <div className="bg-amber-500/20 p-2 rounded-lg"><KeyRound className="w-5 h-5 text-amber-400" /></div>
+              <h2 className="font-bold text-white tracking-tight">Cambiar contraseña</h2>
+            </div>
+            <button onClick={onClose} className="p-1 text-slate-400 hover:text-white"><X className="w-5 h-5" /></button>
+          </div>
+
+          <form onSubmit={submit} className="space-y-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">Contraseña actual</label>
+              <div className="relative">
+                <input type={showActual ? 'text' : 'password'} value={actual} onChange={(e) => setActual(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 pr-10 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+                <button type="button" onClick={() => setShowActual(!showActual)} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-white">
+                  {showActual ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">Nueva contraseña</label>
+              <div className="relative">
+                <input type={showNueva ? 'text' : 'password'} value={nueva} onChange={(e) => setNueva(e.target.value)}
+                  placeholder="Mínimo 6 caracteres"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 pr-10 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+                <button type="button" onClick={() => setShowNueva(!showNueva)} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-white">
+                  {showNueva ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            <Input label="Confirmar nueva contraseña" type={showNueva ? 'text' : 'password'} value={confirmar} onChange={setConfirmar} placeholder="Repite la nueva contraseña" />
+
+            {error && <div className="bg-red-500/20 border border-red-500/30 rounded-lg p-3 text-sm text-red-300">{error}</div>}
+            {ok && <div className="bg-emerald-500/20 border border-emerald-500/30 rounded-lg p-3 text-sm text-emerald-200">{ok}</div>}
+
+            <div className="flex gap-2 pt-2">
+              <Button variant="ghost" onClick={onClose} className="flex-1" disabled={loading}>Cancelar</Button>
+              <Button type="submit" variant="primary" className="flex-1" disabled={loading}>
+                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+                {loading ? 'Guardando...' : 'Actualizar'}
+              </Button>
+            </div>
+          </form>
+        </Card>
+      </div>
+    </div>
+  );
+};
+
 const LoginScreen = ({ onLogin, error: externalError }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPwd, setShowPwd] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [info, setInfo] = useState('');
+  const [resetting, setResetting] = useState(false);
+
+  const recuperarPassword = async () => {
+    setError(''); setInfo('');
+    if (!email.trim()) { setError('Ingresa tu correo para recuperar la contraseña'); return; }
+    if (!firebaseOk) { setError('Recuperación requiere conexión en línea'); return; }
+    setResetting(true);
+    try {
+      await sendPasswordResetEmail(auth, email.trim().toLowerCase());
+      setInfo('Te enviamos un correo con el enlace para restablecer tu contraseña. Revisa tu bandeja de entrada y la carpeta de spam.');
+    } catch (err) {
+      const msg = err.code === 'auth/user-not-found'
+        ? 'No existe una cuenta con ese correo'
+        : err.code === 'auth/invalid-email'
+        ? 'Correo inválido'
+        : err.message || 'No se pudo enviar el correo';
+      setError(msg);
+    } finally {
+      setResetting(false);
+    }
+  };
 
   const submit = async (e) => {
     e?.preventDefault();
@@ -946,10 +1079,19 @@ const LoginScreen = ({ onLogin, error: externalError }) => {
                 {error || externalError}
               </div>
             )}
+            {info && (
+              <div className="bg-emerald-500/20 border border-emerald-500/30 rounded-lg p-3 text-sm text-emerald-200">
+                {info}
+              </div>
+            )}
             <Button type="submit" variant="primary" size="lg" className="w-full" disabled={loading}>
               {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <LogIn className="w-5 h-5" />}
               {loading ? 'Iniciando...' : 'Iniciar sesión'}
             </Button>
+            <button type="button" onClick={recuperarPassword} disabled={resetting}
+              className="w-full text-center text-sm text-amber-400 hover:text-amber-300 disabled:opacity-50 py-1">
+              {resetting ? 'Enviando...' : '¿Olvidaste tu contraseña?'}
+            </button>
           </form>
         </Card>
 
@@ -1154,6 +1296,7 @@ export default function App() {
   const [obraActual, setObraActual] = useState(null);
   const [pantalla, setPantalla] = useState('home');
   const [cloudStatus, setCloudStatus] = useState('loading');
+  const [showChangePwd, setShowChangePwd] = useState(false);
 
   // -------- Auth lifecycle --------
   useEffect(() => {
@@ -1318,10 +1461,19 @@ export default function App() {
             <span className="text-[10px] text-slate-500">·</span>
             <span className="text-[10px] text-slate-400 uppercase tracking-wider">{userProfile?.role}</span>
           </div>
-          <button onClick={handleLogout} className="bg-slate-800 hover:bg-slate-700 p-2 rounded-full">
-            <LogOut className="w-4 h-4 text-slate-300" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setShowChangePwd(true)} title="Cambiar contraseña"
+              className="bg-slate-800 hover:bg-slate-700 p-2 rounded-full">
+              <KeyRound className="w-4 h-4 text-slate-300" />
+            </button>
+            <button onClick={handleLogout} title="Cerrar sesión"
+              className="bg-slate-800 hover:bg-slate-700 p-2 rounded-full">
+              <LogOut className="w-4 h-4 text-slate-300" />
+            </button>
+          </div>
         </div>
+
+        {showChangePwd && <ChangePasswordModal onClose={() => setShowChangePwd(false)} />}
 
         {/* Líder: va directo a la pantalla del reporte */}
         {isLider && obraActual && (
