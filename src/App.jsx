@@ -22,6 +22,18 @@ const CATEGORIAS = ['Cap.', 'M1', 'M2', 'AYU'];
 const ESPECIALIDADES = ['Elect.', 'Mec.', 'Civ.', 'Instr.'];
 const UNIDADES = ['M', 'Ud', 'Cu', 'Kg', 'Gl', 'Pza'];
 const HORAS_DIA = 9;
+const BASE_TRABAJADORES = 10; // filas del formato BV original
+const BASE_ACTIVIDADES = 5;   // actividades del formato BV original (sin Reprocesos / Pérdidas)
+
+const nuevoId = () => Math.random().toString(36).slice(2, 10);
+const nuevoTrabajador = (nColumnas) => ({
+  _k: nuevoId(), nombre: '', categoria: '', especialidad: 'Elect.',
+  horas: Array(nColumnas).fill(''), observaciones: ''
+});
+const nuevaActividad = (idItem = '') => ({
+  _k: nuevoId(), idItem, grupo: '', actividad: '', subArea: '', descripcion: '',
+  unidad: '', cantidad: '', observaciones: ''
+});
 
 // =============================================================
 // Componentes UI
@@ -434,21 +446,47 @@ const LeaderScreen = ({ obra, onBack, hideBack }) => {
     setCorreoExtra('');
   };
 
+  // Las dos últimas filas de "actividades" son siempre HH REPROCESOS y HH PERDIDAS.
+  // Cada trabajador tiene una hora por cada fila de "actividades", en el mismo orden.
   const [trabajadores, setTrabajadores] = useState(() =>
-    Array.from({ length: 10 }, () => ({
-      nombre: '', categoria: '', especialidad: 'Elect.',
-      horas: Array(7).fill(''), observaciones: ''
-    }))
+    Array.from({ length: BASE_TRABAJADORES }, () => nuevoTrabajador(BASE_ACTIVIDADES + 2))
   );
 
   const [actividades, setActividades] = useState(() => [
-    ...Array.from({ length: 5 }, () => ({
-      idItem: '', grupo: '', actividad: '', subArea: '', descripcion: '',
-      unidad: '', cantidad: '', observaciones: ''
-    })),
-    { idItem: 'HH REPROCESOS', grupo: '', actividad: '', subArea: '', descripcion: '', unidad: '', cantidad: '', observaciones: '' },
-    { idItem: 'HH PERDIDAS', grupo: '', actividad: '', subArea: '', descripcion: '', unidad: '', cantidad: '', observaciones: '' },
+    ...Array.from({ length: BASE_ACTIVIDADES }, () => nuevaActividad()),
+    nuevaActividad('HH REPROCESOS'),
+    nuevaActividad('HH PERDIDAS'),
   ]);
+  const nNormales = actividades.length - 2;
+
+  const agregarTrabajador = () => {
+    setTrabajadores(prev => [...prev, nuevoTrabajador(actividades.length)]);
+  };
+  const eliminarTrabajador = (idx) => {
+    const t = trabajadores[idx];
+    const tieneDatos = t.nombre.trim() || t.horas.some(h => parseFloat(h) > 0);
+    if (tieneDatos && !confirm(`¿Quitar a "${t.nombre || 'trabajador ' + (idx + 1)}" y sus horas?`)) return;
+    setTrabajadores(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  // La actividad nueva se inserta antes de Reprocesos / Pérdidas, y a cada
+  // trabajador se le inserta una hora vacía en esa misma posición.
+  const agregarActividad = () => {
+    const pos = actividades.length - 2;
+    setActividades(prev => [...prev.slice(0, pos), nuevaActividad(), ...prev.slice(pos)]);
+    setTrabajadores(prev => prev.map(t => ({
+      ...t, horas: [...t.horas.slice(0, pos), '', ...t.horas.slice(pos)]
+    })));
+  };
+  const eliminarActividad = (idx) => {
+    if (idx >= actividades.length - 2) return;
+    const a = actividades[idx];
+    const hh = trabajadores.reduce((s, t) => s + (parseFloat(t.horas[idx]) || 0), 0);
+    const tieneDatos = a.idItem || a.descripcion || a.cantidad || hh > 0;
+    if (tieneDatos && !confirm(`¿Quitar la actividad ${idx + 1}${hh > 0 ? ` y sus ${hh} HH` : ''}?`)) return;
+    setActividades(prev => prev.filter((_, i) => i !== idx));
+    setTrabajadores(prev => prev.map(t => ({ ...t, horas: t.horas.filter((_, i) => i !== idx) })));
+  };
 
   const [resultado, setResultado] = useState(null);
 
@@ -471,7 +509,7 @@ const LeaderScreen = ({ obra, onBack, hideBack }) => {
   };
   const actualizarActividad = (idx, campo, valor) => {
     const next = [...actividades];
-    if (campo === 'idItem' && idx < 5) {
+    if (campo === 'idItem' && idx < actividades.length - 2) {
       const found = (obra.actividades || []).find(a => String(a.idItem) === String(valor));
       if (found) {
         next[idx] = { ...next[idx], idItem: found.idItem, grupo: found.grupo, actividad: found.actividad, descripcion: next[idx].descripcion || found.actividad };
@@ -488,73 +526,88 @@ const LeaderScreen = ({ obra, onBack, hideBack }) => {
   // Construir Excel
   const construirExcel = () => {
     const wb = XLSX.utils.book_new();
+    // Geometría: con 10 trabajadores y 5 actividades queda idéntica al formato BV.
+    // Cada trabajador extra agrega una fila; cada actividad extra agrega una
+    // columna de horas y dos filas en la tabla inferior.
+    const nTrab = trabajadores.length;
+    const nCols = actividades.length;      // columnas de horas (incluye Reprocesos y Pérdidas)
+    const cH = 8;                          // primera columna de horas
+    const cTot = cH + nCols;               // TOTAL HORAS DIA / UNID
+    const cObs = cTot + 1;                 // OBSERVACIONES del trabajador / CANTIDAD
+    const rTrab = 13;                      // primera fila de trabajadores
+    const rNota = rTrab + nTrab + 1;
+    const rActHead = rNota + 2;
+    const rAct = rActHead + 1;
+    const rFirma = rAct + nCols * 2 + 2;
+    const totalCols = cObs + 3;
+
     const rows = [];
-    for (let i = 0; i < 53; i++) rows.push(Array(19).fill(null));
+    for (let i = 0; i < rFirma + 10; i++) rows.push(Array(totalCols).fill(null));
 
     rows[0][8] = obra.nombre.toUpperCase();
     rows[3][8] = 'REPORTE DIARIO DE TRABAJO';
     rows[7][0] = 'DISCIPLINA:'; rows[7][2] = disciplina;
     rows[7][8] = 'FECHA:'; rows[7][10] = fecha.split('-').reverse().join('/');
-    rows[7][14] = 'EQUIPO:'; rows[7][16] = nombreEquipo;
+    rows[7][cTot - 1] = 'EQUIPO:'; rows[7][cObs] = nombreEquipo;
 
     rows[11][0] = 'CANT.'; rows[11][2] = 'NOMBRE'; rows[11][6] = 'CATEG.'; rows[11][7] = 'ESPEC.';
-    rows[11][8] = 'HORAS TRABAJADAS POR ACTIVIDAD';
-    rows[11][15] = 'TOTAL HORAS DIA'; rows[11][16] = 'OBSERVACIONES';
-    for (let i = 0; i < 7; i++) rows[12][8 + i] = i + 1;
+    rows[11][cH] = 'HORAS TRABAJADAS POR ACTIVIDAD';
+    rows[11][cTot] = 'TOTAL HORAS DIA'; rows[11][cObs] = 'OBSERVACIONES';
+    for (let i = 0; i < nCols; i++) rows[12][cH + i] = i + 1;
 
-    for (let i = 0; i < 10; i++) {
-      const t = trabajadores[i]; const rowIdx = 13 + i;
+    trabajadores.forEach((t, i) => {
+      const rowIdx = rTrab + i;
       rows[rowIdx][0] = i + 1; rows[rowIdx][2] = t.nombre; rows[rowIdx][6] = t.categoria; rows[rowIdx][7] = t.especialidad;
-      for (let j = 0; j < 7; j++) {
+      for (let j = 0; j < nCols; j++) {
         const h = parseFloat(t.horas[j]);
-        if (!isNaN(h) && h > 0) rows[rowIdx][8 + j] = h;
+        if (!isNaN(h) && h > 0) rows[rowIdx][cH + j] = h;
       }
-      rows[rowIdx][15] = totalHorasTrab(t) || 0;
-      rows[rowIdx][16] = t.observaciones;
-    }
-
-    rows[24][0] = 'NOTA:'; rows[24][1] = `LAS H.H. DIA SON ${HORAS_DIA} ( ${HORAS_DIA} HORAS )`;
-    rows[24][7] = 'NOTA:'; rows[24][8] = 'EL CAPATAZ DEBE ESTAR INCLUIDO EN DESGLOSE DE HORAS';
-
-    rows[26][0] = 'Nº ACTIV.'; rows[26][1] = 'ITEM ACTIVIDAD'; rows[26][3] = 'AREA'; rows[26][4] = 'SUB-AREA';
-    rows[26][6] = 'DESCRIPCION DE TRABAJOS'; rows[26][15] = 'UNID'; rows[26][16] = 'CANTIDAD'; rows[26][17] = 'OBSERVACIONES';
-
-    actividades.forEach((a, i) => {
-      const rowIdx = 27 + i * 2;
-      rows[rowIdx][0] = i + 1; rows[rowIdx][1] = a.idItem; rows[rowIdx][3] = a.grupo;
-      rows[rowIdx][4] = a.subArea; rows[rowIdx][6] = a.descripcion || a.actividad;
-      rows[rowIdx][15] = a.unidad; rows[rowIdx][16] = a.cantidad ? parseFloat(a.cantidad) : null;
-      rows[rowIdx][17] = a.observaciones;
+      rows[rowIdx][cTot] = totalHorasTrab(t) || 0;
+      rows[rowIdx][cObs] = t.observaciones;
     });
 
-    rows[43][0] = 'NOMBRE Y FIRMA DE CAPATAZ'; rows[43][6] = 'NOMBRE Y FIRMA DE SUPERVISOR';
-    rows[43][12] = 'NOMBRE Y FIRMA JEFE DE TERRENO / ADMINISTRADOR';
-    rows[46][0] = capataz; rows[46][6] = supervisor; rows[46][12] = jefeTerreno;
+    rows[rNota][0] = 'NOTA:'; rows[rNota][1] = `LAS H.H. DIA SON ${HORAS_DIA} ( ${HORAS_DIA} HORAS )`;
+    rows[rNota][7] = 'NOTA:'; rows[rNota][8] = 'EL CAPATAZ DEBE ESTAR INCLUIDO EN DESGLOSE DE HORAS';
+
+    rows[rActHead][0] = 'Nº ACTIV.'; rows[rActHead][1] = 'ITEM ACTIVIDAD'; rows[rActHead][3] = 'AREA'; rows[rActHead][4] = 'SUB-AREA';
+    rows[rActHead][6] = 'DESCRIPCION DE TRABAJOS'; rows[rActHead][cTot] = 'UNID'; rows[rActHead][cObs] = 'CANTIDAD'; rows[rActHead][cObs + 1] = 'OBSERVACIONES';
+
+    actividades.forEach((a, i) => {
+      const rowIdx = rAct + i * 2;
+      rows[rowIdx][0] = i + 1; rows[rowIdx][1] = a.idItem; rows[rowIdx][3] = a.grupo;
+      rows[rowIdx][4] = a.subArea; rows[rowIdx][6] = a.descripcion || a.actividad;
+      rows[rowIdx][cTot] = a.unidad; rows[rowIdx][cObs] = a.cantidad ? parseFloat(a.cantidad) : null;
+      rows[rowIdx][cObs + 1] = a.observaciones;
+    });
+
+    rows[rFirma][0] = 'NOMBRE Y FIRMA DE CAPATAZ'; rows[rFirma][6] = 'NOMBRE Y FIRMA DE SUPERVISOR';
+    rows[rFirma][12] = 'NOMBRE Y FIRMA JEFE DE TERRENO / ADMINISTRADOR';
+    rows[rFirma + 3][0] = capataz; rows[rFirma + 3][6] = supervisor; rows[rFirma + 3][12] = jefeTerreno;
 
     const ws = XLSX.utils.aoa_to_sheet(rows);
     ws['!cols'] = [
       { wch: 6 }, { wch: 4 }, { wch: 10 }, { wch: 6 }, { wch: 12 }, { wch: 6 }, { wch: 8 }, { wch: 8 },
-      { wch: 6 }, { wch: 6 }, { wch: 6 }, { wch: 6 }, { wch: 6 }, { wch: 6 }, { wch: 6 },
+      ...Array.from({ length: nCols }, () => ({ wch: 6 })),
       { wch: 10 }, { wch: 20 }, { wch: 20 }, { wch: 8 }
     ];
     ws['!merges'] = [
-      { s: { r: 0, c: 8 }, e: { r: 0, c: 14 } }, { s: { r: 3, c: 8 }, e: { r: 3, c: 14 } },
-      { s: { r: 11, c: 2 }, e: { r: 11, c: 5 } }, { s: { r: 11, c: 8 }, e: { r: 11, c: 14 } },
-      { s: { r: 26, c: 1 }, e: { r: 26, c: 2 } }, { s: { r: 26, c: 4 }, e: { r: 26, c: 5 } },
-      { s: { r: 26, c: 6 }, e: { r: 26, c: 14 } },
+      { s: { r: 0, c: 8 }, e: { r: 0, c: cTot - 1 } }, { s: { r: 3, c: 8 }, e: { r: 3, c: cTot - 1 } },
+      { s: { r: 11, c: 2 }, e: { r: 11, c: 5 } }, { s: { r: 11, c: cH }, e: { r: 11, c: cTot - 1 } },
+      { s: { r: rActHead, c: 1 }, e: { r: rActHead, c: 2 } }, { s: { r: rActHead, c: 4 }, e: { r: rActHead, c: 5 } },
+      { s: { r: rActHead, c: 6 }, e: { r: rActHead, c: cTot - 1 } },
     ];
-    for (let i = 0; i < 10; i++) ws['!merges'].push({ s: { r: 13 + i, c: 2 }, e: { r: 13 + i, c: 5 } });
-    for (let i = 0; i < 7; i++) {
-      const r = 27 + i * 2;
+    for (let i = 0; i < nTrab; i++) ws['!merges'].push({ s: { r: rTrab + i, c: 2 }, e: { r: rTrab + i, c: 5 } });
+    for (let i = 0; i < nCols; i++) {
+      const r = rAct + i * 2;
       ws['!merges'].push({ s: { r, c: 1 }, e: { r, c: 2 } });
       ws['!merges'].push({ s: { r, c: 4 }, e: { r, c: 5 } });
-      ws['!merges'].push({ s: { r, c: 6 }, e: { r, c: 14 } });
+      ws['!merges'].push({ s: { r, c: 6 }, e: { r, c: cTot - 1 } });
     }
     XLSX.utils.book_append_sheet(wb, ws, 'REPORTE DIARIO');
 
     // Resumen
     const resumenRows = [['Fecha', 'ID Item', 'Cuadrilla', 'Cantidad (solo M/Ud)', 'Unidad', 'HH Totales', 'Actividad', 'Área']];
-    actividades.slice(0, 5).forEach((a, actIdx) => {
+    actividades.slice(0, -2).forEach((a, actIdx) => {
       if (!a.idItem) return;
       const hhTotal = totalHorasActividad(actIdx);
       const unidadNorm = (a.unidad || '').trim().toLowerCase();
@@ -565,7 +618,7 @@ const LeaderScreen = ({ obra, onBack, hideBack }) => {
         a.unidad || '', hhTotal || 0, a.actividad || a.descripcion || '', a.grupo || ''
       ]);
     });
-    [5, 6].forEach((idx) => {
+    [actividades.length - 2, actividades.length - 1].forEach((idx) => {
       const hhTotal = totalHorasActividad(idx);
       if (hhTotal > 0) {
         resumenRows.push([fecha.split('-').reverse().join('/'), actividades[idx].idItem, nombreEquipo, '', '', hhTotal, '', '']);
@@ -581,8 +634,15 @@ const LeaderScreen = ({ obra, onBack, hideBack }) => {
   const validarDatos = () => {
     if (!nombreEquipo.trim()) { alert('Ingresa el Nombre del Equipo'); return false; }
     if (trabajadoresConNombre.length === 0) { alert('Ingresa al menos un trabajador'); return false; }
-    const actConDatos = actividades.slice(0, 5).filter(a => a.idItem);
+    const actConDatos = actividades.slice(0, -2).filter(a => a.idItem);
     if (actConDatos.length === 0) { alert('Ingresa al menos una actividad'); return false; }
+    // Horas cargadas a una actividad sin ID Item no llegarían a la hoja RESUMEN
+    const sinId = actividades.slice(0, -2)
+      .map((a, i) => (!a.idItem && totalHorasActividad(i) > 0 ? i + 1 : null)).filter(Boolean);
+    if (sinId.length > 0) {
+      alert(`Hay horas asignadas a la(s) actividad(es) ${sinId.join(', ')} sin ID Item. Selecciona la actividad o quita esas horas.`);
+      return false;
+    }
     return true;
   };
 
@@ -689,22 +749,36 @@ const LeaderScreen = ({ obra, onBack, hideBack }) => {
           <SectionHeader icon={Users} title="Cuadrilla" subtitle={`${trabajadoresConNombre.length} trabajador(es) activo(s)`} />
           <div className="space-y-3">
             {trabajadores.map((t, i) => (
-              <TrabajadorCard key={i} numero={i + 1} trabajador={t}
+              <TrabajadorCard key={t._k} numero={i + 1} trabajador={t} actividades={actividades}
                 onChange={(campo, valor) => actualizarTrabajador(i, campo, valor)}
                 onChangeHoras={(actIdx, valor) => actualizarHorasTrabajador(i, actIdx, valor)}
+                onRemove={trabajadores.length > BASE_TRABAJADORES ? () => eliminarTrabajador(i) : null}
                 total={totalHorasTrab(t)} />
             ))}
           </div>
+          <Button onClick={agregarTrabajador} variant="ghost" size="sm" className="w-full mt-3">
+            <Plus className="w-4 h-4" /> Agregar trabajador
+          </Button>
         </Card>
 
         <Card>
-          <SectionHeader icon={ClipboardList} title="Actividades del día" subtitle="5 actividades + HH Reprocesos/Pérdidas" />
+          <SectionHeader icon={ClipboardList} title="Actividades del día" subtitle={`${nNormales} actividades + HH Reprocesos/Pérdidas`} />
           <div className="space-y-3">
-            {actividades.map((a, i) => (
-              <ActividadCard key={i} numero={i + 1} actividad={a} esEspecial={i >= 5}
+            {actividades.slice(0, nNormales).map((a, i) => (
+              <ActividadCard key={a._k} numero={i + 1} actividad={a}
                 opciones={opcionesActividades}
                 onChange={(campo, valor) => actualizarActividad(i, campo, valor)}
+                onRemove={nNormales > BASE_ACTIVIDADES ? () => eliminarActividad(i) : null}
                 hhTotal={totalHorasActividad(i)} />
+            ))}
+            <Button onClick={agregarActividad} variant="ghost" size="sm" className="w-full">
+              <Plus className="w-4 h-4" /> Agregar actividad
+            </Button>
+            {actividades.slice(nNormales).map((a, j) => (
+              <ActividadCard key={a._k} numero={nNormales + j + 1} actividad={a} esEspecial
+                opciones={opcionesActividades}
+                onChange={() => {}}
+                hhTotal={totalHorasActividad(nNormales + j)} />
             ))}
           </div>
         </Card>
@@ -784,7 +858,7 @@ const LeaderScreen = ({ obra, onBack, hideBack }) => {
 };
 
 // Tarjeta trabajador
-const TrabajadorCard = ({ numero, trabajador, onChange, onChangeHoras, total }) => {
+const TrabajadorCard = ({ numero, trabajador, actividades, onChange, onChangeHoras, onRemove, total }) => {
   const [expanded, setExpanded] = useState(false);
   const hayDatos = trabajador.nombre.trim() || total > 0;
   const exceso = total > HORAS_DIA;
@@ -811,21 +885,33 @@ const TrabajadorCard = ({ numero, trabajador, onChange, onChangeHoras, total }) 
             <Select label="Especialidad" value={trabajador.especialidad} onChange={(v) => onChange('especialidad', v)} options={ESPECIALIDADES} />
           </div>
           <div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Horas por actividad (1-7)</div>
-            <div className="grid grid-cols-7 gap-1">
-              {trabajador.horas.map((h, i) => (
-                <div key={i} className="flex flex-col items-center">
-                  <div className="text-[10px] text-slate-500 mb-0.5">{i + 1}</div>
-                  <input type="number" value={h} onChange={(e) => onChangeHoras(i, e.target.value)} min="0" step="0.5" placeholder="0"
-                    className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-1.5 text-white text-xs text-center focus:outline-none focus:ring-1 focus:ring-amber-500" />
-                </div>
-              ))}
+            <div className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Horas por actividad</div>
+            <div className="space-y-1.5">
+              {trabajador.horas.map((h, i) => {
+                const a = actividades[i] || {};
+                const especial = i >= actividades.length - 2;
+                const etiqueta = especial ? a.idItem : (a.actividad || a.descripcion || 'Actividad sin definir');
+                const definida = especial || a.actividad || a.descripcion;
+                return (
+                  <div key={i} className="flex items-center gap-2">
+                    <div className={`w-6 h-6 rounded flex items-center justify-center text-[11px] font-bold shrink-0 ${especial ? 'bg-orange-500/20 text-orange-400' : 'bg-slate-700 text-slate-300'}`}>{i + 1}</div>
+                    <div className={`flex-1 min-w-0 text-xs truncate ${definida ? 'text-slate-300' : 'text-slate-500 italic'}`}>{etiqueta}</div>
+                    <input type="number" inputMode="decimal" value={h} onChange={(e) => onChangeHoras(i, e.target.value)} min="0" step="0.5" placeholder="0"
+                      className="w-16 bg-slate-900 border border-slate-700 rounded px-1 py-1.5 text-white text-sm text-center focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                  </div>
+                );
+              })}
             </div>
             <div className={`mt-2 text-xs flex items-center justify-between ${exceso ? 'text-red-400' : 'text-slate-400'}`}>
               <span>Total HH día:</span><span className="font-bold">{total} / {HORAS_DIA}</span>
             </div>
           </div>
           <Input label="Observaciones" value={trabajador.observaciones} onChange={(v) => onChange('observaciones', v)} />
+          {onRemove && (
+            <button onClick={onRemove} className="w-full flex items-center justify-center gap-2 text-xs text-red-400 hover:bg-red-500/10 border border-red-500/30 rounded-lg py-2">
+              <Trash2 className="w-3.5 h-3.5" /> Quitar trabajador
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -833,7 +919,7 @@ const TrabajadorCard = ({ numero, trabajador, onChange, onChangeHoras, total }) 
 };
 
 // Tarjeta actividad
-const ActividadCard = ({ numero, actividad, esEspecial, opciones, onChange, hhTotal }) => {
+const ActividadCard = ({ numero, actividad, esEspecial, opciones, onChange, onRemove, hhTotal }) => {
   const [expanded, setExpanded] = useState(false);
   const hayDatos = actividad.idItem || actividad.descripcion;
 
@@ -892,6 +978,11 @@ const ActividadCard = ({ numero, actividad, esEspecial, opciones, onChange, hhTo
             <span className="text-slate-400">HH acumuladas</span>
             <span className="text-emerald-400 font-bold">{hhTotal} HH</span>
           </div>
+          {onRemove && (
+            <button onClick={onRemove} className="w-full flex items-center justify-center gap-2 text-xs text-red-400 hover:bg-red-500/10 border border-red-500/30 rounded-lg py-2">
+              <Trash2 className="w-3.5 h-3.5" /> Quitar actividad
+            </button>
+          )}
         </div>
       )}
     </div>
